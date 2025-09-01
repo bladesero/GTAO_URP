@@ -1,4 +1,6 @@
 using System;
+using System.Reflection;
+using UnityEngine.Rendering;
 
 namespace UnityEngine.Rendering.Universal
 {
@@ -87,6 +89,12 @@ namespace UnityEngine.Rendering.Universal
         protected override void Dispose(bool disposing)
         {
             CoreUtils.Destroy(m_Material);
+            
+            // Clean up RTHandles in the pass
+            if (m_SSAOPass != null)
+            {
+                m_SSAOPass.Dispose();
+            }
         }
 
         private bool GetMaterial()
@@ -127,10 +135,10 @@ namespace UnityEngine.Rendering.Universal
             private Matrix4x4[] m_CameraViewProjections = new Matrix4x4[2];
             private ProfilingSampler m_ProfilingSampler = new ProfilingSampler("GTAO");
             private ScriptableRenderer m_Renderer = null;
-            private RenderTargetIdentifier m_SSAOTexture1Target = new RenderTargetIdentifier(s_SSAOTexture1ID, 0, CubemapFace.Unknown, -1);
-            private RenderTargetIdentifier m_SSAOTexture2Target = new RenderTargetIdentifier(s_SSAOTexture2ID, 0, CubemapFace.Unknown, -1);
-            private RenderTargetIdentifier m_SSAOTexture3Target = new RenderTargetIdentifier(s_SSAOTexture3ID, 0, CubemapFace.Unknown, -1);
-            private RenderTargetIdentifier m_SSAOTextureFinalTarget = new RenderTargetIdentifier(s_SSAOTextureFinalID, 0, CubemapFace.Unknown, -1);
+            private RTHandle m_SSAOTexture1Target;
+            private RTHandle m_SSAOTexture2Target;
+            private RTHandle m_SSAOTexture3Target;
+            private RTHandle m_SSAOTextureFinalTarget;
             private RenderTextureDescriptor m_AOPassDescriptor;
             private RenderTextureDescriptor m_BlurPassesDescriptor;
             private RenderTextureDescriptor m_FinalDescriptor;
@@ -322,14 +330,58 @@ namespace UnityEngine.Rendering.Universal
                 m_FinalDescriptor = descriptor;
                 m_FinalDescriptor.colorFormat = m_SupportsR8RenderTextureFormat ? RenderTextureFormat.R8 : RenderTextureFormat.ARGB32;
 
-                // Get temporary render textures
-                cmd.GetTemporaryRT(s_SSAOTexture1ID, m_AOPassDescriptor, FilterMode.Bilinear);
-                cmd.GetTemporaryRT(s_SSAOTexture2ID, m_BlurPassesDescriptor, FilterMode.Bilinear);
-                cmd.GetTemporaryRT(s_SSAOTexture3ID, m_BlurPassesDescriptor, FilterMode.Bilinear);
-                cmd.GetTemporaryRT(s_SSAOTextureFinalID, m_FinalDescriptor, FilterMode.Bilinear);
+                // Get temporary render textures using RTHandle
+                m_SSAOTexture1Target = RTHandles.Alloc(
+                    width: m_AOPassDescriptor.width, 
+                    height: m_AOPassDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_AOPassDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture1"
+                );
+                
+                m_SSAOTexture2Target = RTHandles.Alloc(
+                    width: m_BlurPassesDescriptor.width, 
+                    height: m_BlurPassesDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_BlurPassesDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture2"
+                );
+                
+                m_SSAOTexture3Target = RTHandles.Alloc(
+                    width: m_BlurPassesDescriptor.width, 
+                    height: m_BlurPassesDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_BlurPassesDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture3"
+                );
+                
+                m_SSAOTextureFinalTarget = RTHandles.Alloc(
+                    width: m_FinalDescriptor.width, 
+                    height: m_FinalDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_FinalDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture"
+                );
 
                 // Configure targets and clear color
-                ConfigureTarget(m_CurrentSettings.AfterOpaque ? m_Renderer.cameraColorTarget : s_SSAOTexture2ID);
+                RenderTargetIdentifier cameraColorTarget;
+                if (m_CurrentSettings.AfterOpaque)
+                {
+                    cameraColorTarget = GetCameraColorTarget(m_Renderer);
+                }
+                else
+                {
+                    cameraColorTarget = m_SSAOTexture2Target;
+                }
+                ConfigureTarget(cameraColorTarget);
                 ConfigureClear(ClearFlag.None, Color.white);
             }
 
@@ -368,9 +420,12 @@ namespace UnityEngine.Rendering.Universal
                     // If true, SSAO pass is inserted after opaque pass and is expected to modulate lighting result now.
                     if (m_CurrentSettings.AfterOpaque)
                     {
-                        // This implicitly also bind depth attachment. Explicitly binding m_Renderer.cameraDepthTarget does not work.
+                        // Unity 6 compatibility for camera color target
+                        RenderTargetIdentifier cameraColorTarget = GetCameraColorTarget(m_Renderer);
+                            
+                        // This implicitly also bind depth attachment.
                         cmd.SetRenderTarget(
-                            m_Renderer.cameraColorTarget,
+                            cameraColorTarget,
                             RenderBufferLoadAction.Load,
                             RenderBufferStoreAction.Store
                         );
@@ -382,7 +437,7 @@ namespace UnityEngine.Rendering.Universal
                 CommandBufferPool.Release(cmd);
             }
 
-            private void Render(CommandBuffer cmd, RenderTargetIdentifier target, ShaderPasses pass)
+            private void Render(CommandBuffer cmd, RTHandle target, ShaderPasses pass)
             {
                 cmd.SetRenderTarget(
                     target,
@@ -395,7 +450,7 @@ namespace UnityEngine.Rendering.Universal
                 cmd.DrawMesh(RenderingUtils.fullscreenMesh, Matrix4x4.identity, m_Material, 0, (int)pass);
             }
 
-            private void RenderAndSetBaseMap(CommandBuffer cmd, RenderTargetIdentifier baseMap, RenderTargetIdentifier target, ShaderPasses pass)
+            private void RenderAndSetBaseMap(CommandBuffer cmd, RTHandle baseMap, RTHandle target, ShaderPasses pass)
             {
                 cmd.SetGlobalTexture(s_BaseMapID, baseMap);
                 Render(cmd, target, pass);
@@ -414,10 +469,27 @@ namespace UnityEngine.Rendering.Universal
                     CoreUtils.SetKeyword(cmd, ShaderKeywordStrings.ScreenSpaceOcclusion, false);
                 }
 
-                cmd.ReleaseTemporaryRT(s_SSAOTexture1ID);
-                cmd.ReleaseTemporaryRT(s_SSAOTexture2ID);
-                cmd.ReleaseTemporaryRT(s_SSAOTexture3ID);
-                cmd.ReleaseTemporaryRT(s_SSAOTextureFinalID);
+                // Release RTHandles - Unity 6 handles memory management better with RTHandles
+                if (m_SSAOTexture1Target != null)
+                {
+                    m_SSAOTexture1Target.Release();
+                    m_SSAOTexture1Target = null;
+                }
+                if (m_SSAOTexture2Target != null)
+                {
+                    m_SSAOTexture2Target.Release();
+                    m_SSAOTexture2Target = null;
+                }
+                if (m_SSAOTexture3Target != null)
+                {
+                    m_SSAOTexture3Target.Release();
+                    m_SSAOTexture3Target = null;
+                }
+                if (m_SSAOTextureFinalTarget != null)
+                {
+                    m_SSAOTextureFinalTarget.Release();
+                    m_SSAOTextureFinalTarget = null;
+                }
             }
 
             internal static void SetSourceSize(CommandBuffer cmd, RenderTextureDescriptor desc)
@@ -436,6 +508,57 @@ namespace UnityEngine.Rendering.Universal
             {
 
                 public static readonly int _SourceSize = Shader.PropertyToID("_SourceSize");
+            }
+            
+            // Helper method to get camera color target with Unity 6 compatibility
+            private RenderTargetIdentifier GetCameraColorTarget(ScriptableRenderer renderer)
+            {
+                // Unity 6 compatibility: Try to access the new property first, then fallback
+                var rendererType = renderer.GetType();
+                var colorTargetProperty = rendererType.GetProperty("cameraColorTargetHandle");
+                if (colorTargetProperty != null)
+                {
+                    var rtHandle = colorTargetProperty.GetValue(renderer);
+                    if (rtHandle != null)
+                        return (RTHandle)rtHandle;
+                }
+                
+                // Fallback to legacy property for older Unity versions
+                var legacyProperty = rendererType.GetProperty("cameraColorTarget");
+                if (legacyProperty != null)
+                {
+                    return (RenderTargetIdentifier)legacyProperty.GetValue(renderer);
+                }
+                
+                // Final fallback - this shouldn't happen but provides safety
+                throw new System.InvalidOperationException("Unable to access camera color target. This may indicate an incompatible Unity version.");
+            }
+            
+            /// <summary>
+            /// Dispose method to clean up RTHandles
+            /// </summary>
+            public void Dispose()
+            {
+                if (m_SSAOTexture1Target != null)
+                {
+                    m_SSAOTexture1Target.Release();
+                    m_SSAOTexture1Target = null;
+                }
+                if (m_SSAOTexture2Target != null)
+                {
+                    m_SSAOTexture2Target.Release();
+                    m_SSAOTexture2Target = null;
+                }
+                if (m_SSAOTexture3Target != null)
+                {
+                    m_SSAOTexture3Target.Release();
+                    m_SSAOTexture3Target = null;
+                }
+                if (m_SSAOTextureFinalTarget != null)
+                {
+                    m_SSAOTextureFinalTarget.Release();
+                    m_SSAOTextureFinalTarget = null;
+                }
             }
         }
     }
