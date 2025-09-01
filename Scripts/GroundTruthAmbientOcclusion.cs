@@ -331,35 +331,51 @@ namespace UnityEngine.Rendering.Universal
                 m_FinalDescriptor.colorFormat = m_SupportsR8RenderTextureFormat ? RenderTextureFormat.R8 : RenderTextureFormat.ARGB32;
 
                 // Get temporary render textures using RTHandle
-                m_SSAOTexture1Target = RTHandles.Alloc(m_AOPassDescriptor.width, m_AOPassDescriptor.height, 
-                    colorFormat: m_AOPassDescriptor.colorFormat, filterMode: FilterMode.Bilinear, 
-                    name: "_SSAO_OcclusionTexture1");
-                m_SSAOTexture2Target = RTHandles.Alloc(m_BlurPassesDescriptor.width, m_BlurPassesDescriptor.height, 
-                    colorFormat: m_BlurPassesDescriptor.colorFormat, filterMode: FilterMode.Bilinear, 
-                    name: "_SSAO_OcclusionTexture2");
-                m_SSAOTexture3Target = RTHandles.Alloc(m_BlurPassesDescriptor.width, m_BlurPassesDescriptor.height, 
-                    colorFormat: m_BlurPassesDescriptor.colorFormat, filterMode: FilterMode.Bilinear, 
-                    name: "_SSAO_OcclusionTexture3");
-                m_SSAOTextureFinalTarget = RTHandles.Alloc(m_FinalDescriptor.width, m_FinalDescriptor.height, 
-                    colorFormat: m_FinalDescriptor.colorFormat, filterMode: FilterMode.Bilinear, 
-                    name: "_SSAO_OcclusionTexture");
+                m_SSAOTexture1Target = RTHandles.Alloc(
+                    width: m_AOPassDescriptor.width, 
+                    height: m_AOPassDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_AOPassDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture1"
+                );
+                
+                m_SSAOTexture2Target = RTHandles.Alloc(
+                    width: m_BlurPassesDescriptor.width, 
+                    height: m_BlurPassesDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_BlurPassesDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture2"
+                );
+                
+                m_SSAOTexture3Target = RTHandles.Alloc(
+                    width: m_BlurPassesDescriptor.width, 
+                    height: m_BlurPassesDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_BlurPassesDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture3"
+                );
+                
+                m_SSAOTextureFinalTarget = RTHandles.Alloc(
+                    width: m_FinalDescriptor.width, 
+                    height: m_FinalDescriptor.height, 
+                    slices: 1,
+                    depthBufferBits: DepthBits.None,
+                    colorFormat: m_FinalDescriptor.colorFormat, 
+                    filterMode: FilterMode.Bilinear, 
+                    name: "_SSAO_OcclusionTexture"
+                );
 
                 // Configure targets and clear color
                 RenderTargetIdentifier cameraColorTarget;
                 if (m_CurrentSettings.AfterOpaque)
                 {
-                    // Unity 6 uses cameraColorTargetHandle, fallback to cameraColorTarget for older versions
-                    var rendererType = m_Renderer.GetType();
-                    var colorTargetProperty = rendererType.GetProperty("cameraColorTargetHandle");
-                    if (colorTargetProperty != null)
-                    {
-                        cameraColorTarget = (RTHandle)colorTargetProperty.GetValue(m_Renderer);
-                    }
-                    else
-                    {
-                        var legacyProperty = rendererType.GetProperty("cameraColorTarget");
-                        cameraColorTarget = (RenderTargetIdentifier)legacyProperty.GetValue(m_Renderer);
-                    }
+                    cameraColorTarget = GetCameraColorTarget(m_Renderer);
                 }
                 else
                 {
@@ -405,18 +421,7 @@ namespace UnityEngine.Rendering.Universal
                     if (m_CurrentSettings.AfterOpaque)
                     {
                         // Unity 6 compatibility for camera color target
-                        RenderTargetIdentifier cameraColorTarget;
-                        var rendererType = m_Renderer.GetType();
-                        var colorTargetProperty = rendererType.GetProperty("cameraColorTargetHandle");
-                        if (colorTargetProperty != null)
-                        {
-                            cameraColorTarget = (RTHandle)colorTargetProperty.GetValue(m_Renderer);
-                        }
-                        else
-                        {
-                            var legacyProperty = rendererType.GetProperty("cameraColorTarget");
-                            cameraColorTarget = (RenderTargetIdentifier)legacyProperty.GetValue(m_Renderer);
-                        }
+                        RenderTargetIdentifier cameraColorTarget = GetCameraColorTarget(m_Renderer);
                             
                         // This implicitly also bind depth attachment.
                         cmd.SetRenderTarget(
@@ -464,11 +469,27 @@ namespace UnityEngine.Rendering.Universal
                     CoreUtils.SetKeyword(cmd, ShaderKeywordStrings.ScreenSpaceOcclusion, false);
                 }
 
-                // Release RTHandles
-                m_SSAOTexture1Target?.Release();
-                m_SSAOTexture2Target?.Release();
-                m_SSAOTexture3Target?.Release();
-                m_SSAOTextureFinalTarget?.Release();
+                // Release RTHandles - Unity 6 handles memory management better with RTHandles
+                if (m_SSAOTexture1Target != null)
+                {
+                    m_SSAOTexture1Target.Release();
+                    m_SSAOTexture1Target = null;
+                }
+                if (m_SSAOTexture2Target != null)
+                {
+                    m_SSAOTexture2Target.Release();
+                    m_SSAOTexture2Target = null;
+                }
+                if (m_SSAOTexture3Target != null)
+                {
+                    m_SSAOTexture3Target.Release();
+                    m_SSAOTexture3Target = null;
+                }
+                if (m_SSAOTextureFinalTarget != null)
+                {
+                    m_SSAOTextureFinalTarget.Release();
+                    m_SSAOTextureFinalTarget = null;
+                }
             }
 
             internal static void SetSourceSize(CommandBuffer cmd, RenderTextureDescriptor desc)
@@ -489,15 +510,55 @@ namespace UnityEngine.Rendering.Universal
                 public static readonly int _SourceSize = Shader.PropertyToID("_SourceSize");
             }
             
+            // Helper method to get camera color target with Unity 6 compatibility
+            private RenderTargetIdentifier GetCameraColorTarget(ScriptableRenderer renderer)
+            {
+                // Unity 6 compatibility: Try to access the new property first, then fallback
+                var rendererType = renderer.GetType();
+                var colorTargetProperty = rendererType.GetProperty("cameraColorTargetHandle");
+                if (colorTargetProperty != null)
+                {
+                    var rtHandle = colorTargetProperty.GetValue(renderer);
+                    if (rtHandle != null)
+                        return (RTHandle)rtHandle;
+                }
+                
+                // Fallback to legacy property for older Unity versions
+                var legacyProperty = rendererType.GetProperty("cameraColorTarget");
+                if (legacyProperty != null)
+                {
+                    return (RenderTargetIdentifier)legacyProperty.GetValue(renderer);
+                }
+                
+                // Final fallback - this shouldn't happen but provides safety
+                throw new System.InvalidOperationException("Unable to access camera color target. This may indicate an incompatible Unity version.");
+            }
+            
             /// <summary>
             /// Dispose method to clean up RTHandles
             /// </summary>
             public void Dispose()
             {
-                m_SSAOTexture1Target?.Release();
-                m_SSAOTexture2Target?.Release();
-                m_SSAOTexture3Target?.Release();
-                m_SSAOTextureFinalTarget?.Release();
+                if (m_SSAOTexture1Target != null)
+                {
+                    m_SSAOTexture1Target.Release();
+                    m_SSAOTexture1Target = null;
+                }
+                if (m_SSAOTexture2Target != null)
+                {
+                    m_SSAOTexture2Target.Release();
+                    m_SSAOTexture2Target = null;
+                }
+                if (m_SSAOTexture3Target != null)
+                {
+                    m_SSAOTexture3Target.Release();
+                    m_SSAOTexture3Target = null;
+                }
+                if (m_SSAOTextureFinalTarget != null)
+                {
+                    m_SSAOTextureFinalTarget.Release();
+                    m_SSAOTextureFinalTarget = null;
+                }
             }
         }
     }
